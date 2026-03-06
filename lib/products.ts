@@ -7,6 +7,7 @@ export interface Product {
   subCategoryId: number;
   title: string;
   categoryName: string;
+  retailPrice: number;
   retailerSku: string;
   categoryId: number;
   subCategoryName: string;
@@ -43,12 +44,29 @@ export class ProductService {
     }
 
     if (filters?.search) {
-      const searchLower = filters.search.toLowerCase();
+      const normalizedSearch = filters.search.trim().toLowerCase();
+      const searchTerms = new Set([normalizedSearch]);
+
+      // Simple plural handling: "chocolates" also tries "chocolate".
+      if (normalizedSearch.endsWith('s') && normalizedSearch.length > 1) {
+        searchTerms.add(normalizedSearch.slice(0, -1));
+      }
+
+      const matchesSearch = (value: string): boolean => {
+        const normalizedValue = value.trim().toLowerCase();
+        for (const term of searchTerms) {
+          if (normalizedValue.includes(term)) {
+            return true;
+          }
+        }
+        return false;
+      };
+
       filtered = filtered.filter(
         (p) =>
-          p.title.toLowerCase().includes(searchLower) ||
-          p.categoryName.toLowerCase().includes(searchLower) ||
-          p.subCategoryName.toLowerCase().includes(searchLower)
+          matchesSearch(p.title) ||
+          matchesSearch(p.categoryName) ||
+          matchesSearch(p.subCategoryName)
       );
     }
 

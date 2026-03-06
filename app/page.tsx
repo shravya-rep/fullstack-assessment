@@ -29,6 +29,34 @@ interface Product {
   categoryName: string;
   subCategoryName: string;
   imageUrls: string[];
+  retailPrice: number;
+}
+
+interface CategoriesResponse {
+  categories: string[];
+}
+
+interface SubCategoriesResponse {
+  subCategories: string[];
+}
+
+interface ProductsResponse {
+  products: Product[];
+}
+
+const ALL_CATEGORIES_VALUE = "__all_categories__";
+const ALL_SUBCATEGORIES_VALUE = "__all_subcategories__";
+const PRICE_FORMATTER = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+});
+
+async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(url, { signal });
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status}`);
+  }
+  return (await response.json()) as T;
 }
 
 export default function Home() {
@@ -36,46 +64,138 @@ export default function Home() {
   const [categories, setCategories] = useState<string[]>([]);
   const [subCategories, setSubCategories] = useState<string[]>([]);
   const [search, setSearch] = useState("");
-  const [selectedCategory, setSelectedCategory] = useState<string | undefined>(
-    undefined
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState(
+    ALL_CATEGORIES_VALUE
   );
-  const [selectedSubCategory, setSelectedSubCategory] = useState<
-    string | undefined
-  >(undefined);
+  const [selectedSubCategory, setSelectedSubCategory] = useState(
+    ALL_SUBCATEGORIES_VALUE
+  );
   const [loading, setLoading] = useState(true);
+  const [productsError, setProductsError] = useState<string | null>(null);
+  const [initialized, setInitialized] = useState(false);
 
   useEffect(() => {
-    fetch("/api/categories")
-      .then((res) => res.json())
-      .then((data) => setCategories(data.categories));
+    const params = new URLSearchParams(window.location.search);
+    const searchParam = params.get("search") ?? "";
+    const categoryParam = params.get("category");
+    const subCategoryParam = params.get("subCategory");
+
+    setSearch(searchParam);
+    setDebouncedSearch(searchParam.trim());
+    setSelectedCategory(categoryParam || ALL_CATEGORIES_VALUE);
+    setSelectedSubCategory(subCategoryParam || ALL_SUBCATEGORIES_VALUE);
+    setProductsError(null);
+    setInitialized(true);
   }, []);
 
   useEffect(() => {
-    if (selectedCategory) {
-      fetch(`/api/subcategories`)
-        .then((res) => res.json())
-        .then((data) => setSubCategories(data.subCategories));
-    } else {
-      setSubCategories([]);
-      setSelectedSubCategory(undefined);
-    }
-  }, [selectedCategory]);
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(search.trim());
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [search]);
 
   useEffect(() => {
-    setLoading(true);
+    if (!initialized) return;
+
     const params = new URLSearchParams();
-    if (search) params.append("search", search);
-    if (selectedCategory) params.append("category", selectedCategory);
-    if (selectedSubCategory) params.append("subCategory", selectedSubCategory);
+    if (debouncedSearch) params.set("search", debouncedSearch);
+    if (selectedCategory !== ALL_CATEGORIES_VALUE) {
+      params.set("category", selectedCategory);
+    }
+    if (selectedSubCategory !== ALL_SUBCATEGORIES_VALUE) {
+      params.set("subCategory", selectedSubCategory);
+    }
+
+    const query = params.toString();
+    const nextUrl = query ? `/?${query}` : "/";
+    window.history.replaceState(window.history.state, "", nextUrl);
+  }, [initialized, debouncedSearch, selectedCategory, selectedSubCategory]);
+
+  useEffect(() => {
+    if (!initialized) return;
+
+    const controller = new AbortController();
+
+    fetchJson<CategoriesResponse>("/api/categories", controller.signal)
+      .then((data) => setCategories(data.categories))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setCategories([]);
+      });
+
+    return () => controller.abort();
+  }, [initialized]);
+
+  useEffect(() => {
+    if (!initialized) return;
+
+    const controller = new AbortController();
+
+    if (selectedCategory !== ALL_CATEGORIES_VALUE) {
+      setSelectedSubCategory(ALL_SUBCATEGORIES_VALUE);
+      fetchJson<SubCategoriesResponse>(
+        `/api/subcategories?category=${encodeURIComponent(selectedCategory)}`,
+        controller.signal
+      )
+        .then((data) => setSubCategories(data.subCategories))
+        .catch((error: unknown) => {
+          if (error instanceof DOMException && error.name === "AbortError") {
+            return;
+          }
+          setSubCategories([]);
+        });
+    } else {
+      setSubCategories([]);
+      setSelectedSubCategory(ALL_SUBCATEGORIES_VALUE);
+    }
+
+    return () => controller.abort();
+  }, [initialized, selectedCategory]);
+
+  useEffect(() => {
+    if (!initialized) return;
+
+    const controller = new AbortController();
+
+    setLoading(true);
+    setProductsError(null);
+    const params = new URLSearchParams();
+    if (debouncedSearch) params.append("search", debouncedSearch);
+    if (selectedCategory !== ALL_CATEGORIES_VALUE) {
+      params.append("category", selectedCategory);
+    }
+    if (selectedSubCategory !== ALL_SUBCATEGORIES_VALUE) {
+      params.append("subCategory", selectedSubCategory);
+    }
     params.append("limit", "20");
 
-    fetch(`/api/products?${params}`)
-      .then((res) => res.json())
+    fetchJson<ProductsResponse>(`/api/products?${params}`, controller.signal)
       .then((data) => {
-        setProducts(data.products);
-        setLoading(false);
+        setProducts(Array.isArray(data.products) ? data.products : []);
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        console.error("Failed to fetch products:", error);
+        setProducts([]);
+        setProductsError(
+          "We couldn't load products right now. Please try again."
+        );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       });
-  }, [search, selectedCategory, selectedSubCategory]);
+
+    return () => controller.abort();
+  }, [initialized, debouncedSearch, selectedCategory, selectedSubCategory]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -85,8 +205,17 @@ export default function Home() {
 
           <div className="flex flex-col md:flex-row gap-4 mb-4">
             <div className="relative flex-1">
-              <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+              <label htmlFor="product-search" className="sr-only">
+                Search products
+              </label>
+              <Search
+                aria-hidden="true"
+                className="absolute left-3 top-3 h-4 w-4 text-muted-foreground"
+              />
               <Input
+                id="product-search"
+                name="productSearch"
+                autoComplete="off"
                 placeholder="Search products..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
@@ -95,13 +224,17 @@ export default function Home() {
             </div>
 
             <Select
+              name="category"
               value={selectedCategory}
-              onValueChange={(value) => setSelectedCategory(value || undefined)}
+              onValueChange={(value) => setSelectedCategory(value)}
             >
-              <SelectTrigger className="w-full md:w-[200px]">
-                <SelectValue placeholder="All Categories" />
+              <SelectTrigger id="category-filter" className="w-full md:w-[200px]">
+                <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value={ALL_CATEGORIES_VALUE}>
+                  All Categories
+                </SelectItem>
                 {categories.map((cat) => (
                   <SelectItem key={cat} value={cat}>
                     {cat}
@@ -110,17 +243,23 @@ export default function Home() {
               </SelectContent>
             </Select>
 
-            {selectedCategory && subCategories.length > 0 && (
+            {selectedCategory !== ALL_CATEGORIES_VALUE &&
+              subCategories.length > 0 && (
               <Select
+                name="subCategory"
                 value={selectedSubCategory}
-                onValueChange={(value) =>
-                  setSelectedSubCategory(value || undefined)
-                }
+                onValueChange={(value) => setSelectedSubCategory(value)}
               >
-                <SelectTrigger className="w-full md:w-[200px]">
-                  <SelectValue placeholder="All Subcategories" />
+                <SelectTrigger
+                  id="subcategory-filter"
+                  className="w-full md:w-[200px]"
+                >
+                  <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value={ALL_SUBCATEGORIES_VALUE}>
+                    All Subcategories
+                  </SelectItem>
                   {subCategories.map((subCat) => (
                     <SelectItem key={subCat} value={subCat}>
                       {subCat}
@@ -130,13 +269,15 @@ export default function Home() {
               </Select>
             )}
 
-            {(search || selectedCategory || selectedSubCategory) && (
+            {(search ||
+              selectedCategory !== ALL_CATEGORIES_VALUE ||
+              selectedSubCategory !== ALL_SUBCATEGORIES_VALUE) && (
               <Button
                 variant="outline"
                 onClick={() => {
                   setSearch("");
-                  setSelectedCategory(undefined);
-                  setSelectedSubCategory(undefined);
+                  setSelectedCategory(ALL_CATEGORIES_VALUE);
+                  setSelectedSubCategory(ALL_SUBCATEGORIES_VALUE);
                 }}
               >
                 Clear Filters
@@ -147,13 +288,69 @@ export default function Home() {
       </header>
 
       <main className="container mx-auto px-4 py-8">
+        {selectedCategory !== ALL_CATEGORIES_VALUE && (
+          <nav
+            aria-label="Breadcrumb"
+            className="mb-4 text-sm text-muted-foreground"
+          >
+            <ol className="flex flex-wrap items-center gap-2">
+              <li>
+                <Link
+                  href="/"
+                  className="hover:text-foreground underline-offset-4 hover:underline"
+                  onClick={() => {
+                    setSearch("");
+                    setSelectedCategory(ALL_CATEGORIES_VALUE);
+                    setSelectedSubCategory(ALL_SUBCATEGORIES_VALUE);
+                    setProductsError(null);
+                  }}
+                >
+                  Home
+                </Link>
+              </li>
+              <li aria-hidden="true">{">"}</li>
+              <li className="text-foreground" aria-current="page">
+                {selectedCategory}
+              </li>
+            </ol>
+          </nav>
+        )}
+
         {loading ? (
-          <div className="text-center py-12">
-            <p className="text-muted-foreground">Loading products...</p>
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">Loading products...</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              {Array.from({ length: 8 }).map((_, idx) => (
+                <Card key={idx} className="h-full animate-pulse">
+                  <CardHeader className="p-0">
+                    <div className="h-48 w-full rounded-t-lg bg-muted" />
+                  </CardHeader>
+                  <CardContent className="pt-4 space-y-3">
+                    <div className="h-4 w-4/5 rounded bg-muted" />
+                    <div className="h-6 w-1/3 rounded bg-muted" />
+                    <div className="flex gap-2">
+                      <div className="h-5 w-20 rounded bg-muted" />
+                      <div className="h-5 w-24 rounded bg-muted" />
+                    </div>
+                  </CardContent>
+                  <CardFooter>
+                    <div className="h-9 w-full rounded bg-muted" />
+                  </CardFooter>
+                </Card>
+              ))}
+            </div>
           </div>
         ) : products.length === 0 ? (
           <div className="text-center py-12">
-            <p className="text-muted-foreground">No products found</p>
+            {productsError ? (
+              <p className="text-destructive">{productsError}</p>
+            ) : (
+              <p className="text-muted-foreground">
+                {search.trim()
+                  ? `No products found for "${search.trim()}". Try a different keyword or clear filters.`
+                  : "No products found. Try adjusting your filters."}
+              </p>
+            )}
           </div>
         ) : (
           <>
@@ -161,13 +358,15 @@ export default function Home() {
               Showing {products.length} products
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-              {products.map((product) => (
+              {products.map((product, index) => (
                 <Link
                   key={product.stacklineSku}
                   href={{
                     pathname: "/product",
-                    query: { product: JSON.stringify(product) },
+                    query: { sku: product.stacklineSku },
                   }}
+                  aria-label={`View details for ${product.title}`}
+                  className="rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                 >
                   <Card className="h-full hover:shadow-lg transition-shadow cursor-pointer">
                     <CardHeader className="p-0">
@@ -175,10 +374,11 @@ export default function Home() {
                         {product.imageUrls[0] && (
                           <Image
                             src={product.imageUrls[0]}
-                            alt={product.title}
+                            alt={`Product image for ${product.title}`}
                             fill
                             className="object-contain p-4"
                             sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+                            priority={index < 20}
                           />
                         )}
                       </div>
@@ -187,6 +387,9 @@ export default function Home() {
                       <CardTitle className="text-base line-clamp-2 mb-2">
                         {product.title}
                       </CardTitle>
+                      <p className="text-lg font-semibold mb-2">
+                        {PRICE_FORMATTER.format(product.retailPrice)}
+                      </p>
                       <CardDescription className="flex gap-2 flex-wrap">
                         <Badge variant="secondary">
                           {product.categoryName}
@@ -197,8 +400,8 @@ export default function Home() {
                       </CardDescription>
                     </CardContent>
                     <CardFooter>
-                      <Button variant="outline" className="w-full">
-                        View Details
+                      <Button asChild variant="outline" className="w-full">
+                        <span>View Details</span>
                       </Button>
                     </CardFooter>
                   </Card>
